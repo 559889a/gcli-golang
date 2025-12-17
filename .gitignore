@@ -1,0 +1,4 @@
+*.md
+credentials/
+.claude/
+geminicli2api
