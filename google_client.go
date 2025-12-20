@@ -106,13 +106,19 @@ func sendGeminiRequest(cred *Credential, payload map[string]interface{}, isStrea
 	req.Header.Set("User-Agent", getUserAgent())
 
 	// Send request
-	return http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[网络错误] Gemini API 请求失败: %v", err)
+		return nil, err
+	}
+	return resp, nil
 }
 
 // handleNonStreamingResponse processes a non-streaming response from Google API
 func handleNonStreamingResponse(resp *http.Response) (map[string]interface{}, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("[网络错误] 读取响应失败: %v", err)
 		return nil, err
 	}
 
@@ -120,7 +126,7 @@ func handleNonStreamingResponse(resp *http.Response) (map[string]interface{}, er
 
 	// Log error responses
 	if resp.StatusCode >= 400 {
-		log.Printf("Google API error response: %s", bodyStr)
+		log.Printf("[HTTP %d] Google API 错误: %s", resp.StatusCode, bodyStr)
 	}
 
 	// Remove possible "data: " prefix (sometimes present even in non-streaming)
@@ -170,7 +176,11 @@ func NewStreamWriter(w http.ResponseWriter, model string) *StreamWriter {
 // WriteChunk writes a single chunk to the stream
 func (sw *StreamWriter) WriteChunk(chunk map[string]interface{}) {
 	openaiChunk := geminiStreamChunkToOpenAI(chunk, sw.model, sw.responseID)
-	chunkJSON, _ := json.Marshal(openaiChunk)
+	chunkJSON, err := json.Marshal(openaiChunk)
+	if err != nil {
+		log.Printf("[错误] 序列化 chunk 失败: %v", err)
+		return
+	}
 	fmt.Fprintf(sw.w, "data: %s\n\n", chunkJSON)
 	if sw.flusher != nil {
 		sw.flusher.Flush()
@@ -189,8 +199,13 @@ func (sw *StreamWriter) WriteDone() {
 func handleStreamingResponse(resp *http.Response, w http.ResponseWriter, model string) {
 	// Handle error responses
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Google API error response (streaming): %s", string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[网络错误] 读取错误响应失败: %v", err)
+			http.Error(w, "Failed to read error response", http.StatusBadGateway)
+			return
+		}
+		log.Printf("[HTTP %d] Google API 错误: %s", resp.StatusCode, string(body))
 		http.Error(w, fmt.Sprintf("Google API error: %s", resp.Status), resp.StatusCode)
 		return
 	}

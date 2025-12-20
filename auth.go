@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -168,25 +169,13 @@ func (c *Credential) EnsureValid() error {
 
 	log.Printf("Refreshing token for credential %s", c.FilePath)
 
-	// Refresh the token
-	resp, err := http.PostForm("https://oauth2.googleapis.com/token", url.Values{
+	tokenResp, err := requestOAuthToken(url.Values{
 		"client_id":     {c.ClientID},
 		"client_secret": {c.ClientSecret},
 		"refresh_token": {c.RefreshToken},
 		"grant_type":    {"refresh_token"},
 	})
 	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-		TokenType   string `json:"token_type"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return err
 	}
 
@@ -285,26 +274,43 @@ type TokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
+// requestOAuthToken sends a token request to Google OAuth endpoint
+func requestOAuthToken(params url.Values) (*TokenResponse, error) {
+	resp, err := http.PostForm("https://oauth2.googleapis.com/token", params)
+	if err != nil {
+		log.Printf("[网络错误] OAuth token 请求失败: %v", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[网络错误] 读取 OAuth 响应失败: %v", err)
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[HTTP %d] OAuth token 请求失败: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("oauth request failed with status %d", resp.StatusCode)
+	}
+
+	var tokenResp TokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, err
+	}
+
+	return &tokenResp, nil
+}
+
 // exchangeCodeForToken exchanges an authorization code for tokens
 func exchangeCodeForToken(code, redirectURI string) (*TokenResponse, error) {
-	resp, err := http.PostForm("https://oauth2.googleapis.com/token", url.Values{
+	return requestOAuthToken(url.Values{
 		"client_id":     {ClientID},
 		"client_secret": {ClientSecret},
 		"code":          {code},
 		"grant_type":    {"authorization_code"},
 		"redirect_uri":  {redirectURI},
 	})
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, err
-	}
-
-	return &tokenResp, nil
 }
 
 // discoverProjectID discovers the Cloud AI Companion project ID
@@ -313,7 +319,10 @@ func discoverProjectID(accessToken string) (string, error) {
 		"metadata": getClientMetadata(""),
 	}
 
-	jsonData, _ := json.Marshal(payload)
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
 
 	req, err := http.NewRequest("POST", CodeAssistEndpoint+"/v1internal:loadCodeAssist",
 		bytes.NewBuffer(jsonData))
@@ -327,11 +336,22 @@ func discoverProjectID(accessToken string) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("[网络错误] discoverProjectID 请求失败: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[网络错误] discoverProjectID 读取响应失败: %v", err)
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[HTTP %d] discoverProjectID 失败: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("discover project failed with status %d", resp.StatusCode)
+	}
+
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
 		return "", err
@@ -428,7 +448,10 @@ func onboardUser(cred *Credential) error {
 
 // postToGoogle sends a POST request to the Google API
 func postToGoogle(cred *Credential, path string, payload map[string]interface{}) (map[string]interface{}, error) {
-	jsonData, _ := json.Marshal(payload)
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequest("POST", CodeAssistEndpoint+path, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -441,13 +464,25 @@ func postToGoogle(cred *Credential, path string, payload map[string]interface{})
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("[网络错误] postToGoogle %s 请求失败: %v", path, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[网络错误] postToGoogle %s 读取响应失败: %v", path, err)
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		log.Printf("[HTTP %d] postToGoogle %s 失败: %s", resp.StatusCode, path, string(body))
+	}
+
 	var data map[string]interface{}
-	json.Unmarshal(body, &data)
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
 
 	return data, nil
 }
