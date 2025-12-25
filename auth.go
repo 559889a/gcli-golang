@@ -43,6 +43,92 @@ type CredentialPool struct {
 // Global credential pool
 var credentialPool *CredentialPool
 
+// Admin session management
+var (
+	adminSessions   = make(map[string]time.Time)
+	adminSessionsMu sync.RWMutex
+)
+
+const sessionCookieName = "geminicli2api_session"
+const sessionDuration = 24 * time.Hour
+
+// generateSessionID generates a random session ID
+func generateSessionID() string {
+	bytes := make([]byte, 32)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
+// createAdminSession creates a new admin session and returns the session ID
+func createAdminSession() string {
+	adminSessionsMu.Lock()
+	defer adminSessionsMu.Unlock()
+
+	sessionID := generateSessionID()
+	adminSessions[sessionID] = time.Now().Add(sessionDuration)
+	return sessionID
+}
+
+// validateAdminSession checks if a session ID is valid
+func validateAdminSession(sessionID string) bool {
+	adminSessionsMu.RLock()
+	defer adminSessionsMu.RUnlock()
+
+	expiry, exists := adminSessions[sessionID]
+	if !exists {
+		return false
+	}
+	return time.Now().Before(expiry)
+}
+
+// deleteAdminSession removes a session
+func deleteAdminSession(sessionID string) {
+	adminSessionsMu.Lock()
+	defer adminSessionsMu.Unlock()
+	delete(adminSessions, sessionID)
+}
+
+// getSessionFromRequest extracts session ID from request cookie
+func getSessionFromRequest(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+// isAdminAuthenticated checks if the request has a valid admin session
+func isAdminAuthenticated(r *http.Request) bool {
+	sessionID := getSessionFromRequest(r)
+	if sessionID == "" {
+		return false
+	}
+	return validateAdminSession(sessionID)
+}
+
+// setSessionCookie sets the session cookie on the response
+func setSessionCookie(w http.ResponseWriter, sessionID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   int(sessionDuration.Seconds()),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearSessionCookie clears the session cookie
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+}
+
 // LoadCredentialPool scans the credentials directory and loads all credential files
 func LoadCredentialPool() *CredentialPool {
 	pool := &CredentialPool{

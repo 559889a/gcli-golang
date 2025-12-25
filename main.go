@@ -51,11 +51,17 @@ func setupRoutes() *http.ServeMux {
 	mux.HandleFunc("GET /", handleRoot)
 	mux.HandleFunc("GET /health", handleHealth)
 
-	// Credential config frontend (no API auth)
-	mux.HandleFunc("GET /config", handleConfigPage)
-	mux.HandleFunc("GET /config/oauth/start", handleOAuthStart)
-	mux.HandleFunc("GET /config/oauth/callback", handleOAuthCallback)
-	mux.HandleFunc("DELETE /config/credential", handleDeleteCredential)
+	// Admin login
+	mux.HandleFunc("GET /config/login", handleLoginPage)
+	mux.HandleFunc("POST /config/login", handleLogin)
+	mux.HandleFunc("GET /config/logout", handleLogout)
+
+	// Credential config frontend (admin auth required)
+	mux.HandleFunc("GET /config", withAdminAuth(handleConfigPage))
+	mux.HandleFunc("GET /config/oauth/start", withAdminAuth(handleOAuthStart))
+	mux.HandleFunc("GET /config/oauth/callback", handleOAuthCallback) // OAuth callback doesn't need auth
+	mux.HandleFunc("DELETE /config/credential", withAdminAuth(handleDeleteCredential))
+	mux.HandleFunc("POST /config/credential", withAdminAuth(handleAddCredential))
 
 	// OpenAI compatible endpoints (auth required)
 	mux.HandleFunc("GET /v1/models", withAuth(handleListModels))
@@ -64,7 +70,7 @@ func setupRoutes() *http.ServeMux {
 	return mux
 }
 
-// withAuth is an authentication middleware
+// withAuth is an authentication middleware for API endpoints
 func withAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		addCORSHeaders(w)
@@ -72,6 +78,17 @@ func withAuth(handler http.HandlerFunc) http.HandlerFunc {
 		if !authenticateUser(r) {
 			w.Header().Set("WWW-Authenticate", "Basic")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+// withAdminAuth is an authentication middleware for admin pages
+func withAdminAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isAdminAuthenticated(r) {
+			http.Redirect(w, r, "/config/login", http.StatusFound)
 			return
 		}
 		handler(w, r)
@@ -214,6 +231,42 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Login page HTML template
+const loginPageHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>geminicli2api 登录</title>
+    <style>
+        body { font-family: sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; }
+        .login-box { border: 1px solid #ccc; padding: 30px; border-radius: 10px; background: #f9f9f9; }
+        h1 { color: #333; text-align: center; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; color: #666; }
+        input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #45a049; }
+        .error { color: red; text-align: center; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>管理员登录</h1>
+        {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+        <form method="POST" action="/config/login">
+            <div class="form-group">
+                <label>用户名</label>
+                <input type="text" name="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" name="password" required>
+            </div>
+            <button type="submit">登录</button>
+        </form>
+    </div>
+</body>
+</html>`
+
 // Config page HTML template
 const configPageHTML = `<!DOCTYPE html>
 <html>
@@ -255,6 +308,24 @@ const configPageHTML = `<!DOCTYPE html>
 
     <h2>添加新凭证</h2>
     <button class="add-btn" onclick="startOAuth()">开始 OAuth 登录</button>
+    <button class="add-btn" onclick="toggleManualForm()" style="background: #2196F3; margin-left: 10px;">手动填入凭证</button>
+    <button class="logout-btn" onclick="logout()" style="background: #666; margin-left: 10px;">退出登录</button>
+
+    <div id="manualForm" style="display: none; margin-top: 20px;">
+        <h3>手动填入凭证 JSON</h3>
+        <p class="info">粘贴完整的凭证 JSON（包含 client_id, client_secret, token, refresh_token 等字段）</p>
+        <textarea id="credentialJson" style="width: 100%; height: 300px; font-family: monospace; font-size: 12px; padding: 10px; border: 1px solid #ccc; border-radius: 5px;" placeholder='{
+    "client_id": "xxx.apps.googleusercontent.com",
+    "client_secret": "GOCSPX-xxx",
+    "token": "ya29.xxx",
+    "refresh_token": "1//xxx",
+    "expiry": "2025-12-25T12:00:00+08:00",
+    "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "project_id": "your-project-id"
+}'></textarea>
+        <button class="add-btn" onclick="saveCredential()" style="margin-top: 10px;">保存凭证</button>
+    </div>
 
     <script>
         function startOAuth() {
@@ -265,6 +336,33 @@ const configPageHTML = `<!DOCTYPE html>
                 fetch('/config/credential?path=' + encodeURIComponent(path), {method: 'DELETE'})
                     .then(() => location.reload());
             }
+        }
+        function toggleManualForm() {
+            var form = document.getElementById('manualForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+        function saveCredential() {
+            var json = document.getElementById('credentialJson').value;
+            try {
+                JSON.parse(json);
+            } catch (e) {
+                alert('JSON 格式错误: ' + e.message);
+                return;
+            }
+            fetch('/config/credential', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: json
+            }).then(resp => {
+                if (resp.ok) {
+                    location.reload();
+                } else {
+                    resp.text().then(text => alert('保存失败: ' + text));
+                }
+            }).catch(err => alert('请求失败: ' + err));
+        }
+        function logout() {
+            window.location.href = '/config/logout';
         }
     </script>
 </body>
@@ -407,4 +505,131 @@ func handleDeleteCredential(w http.ResponseWriter, r *http.Request) {
 	credentialPool.Reload()
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// LoginPageData represents data for the login page template
+type LoginPageData struct {
+	Error string
+}
+
+// handleLoginPage renders the login page
+func handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	// If already logged in, redirect to config page
+	if isAdminAuthenticated(r) {
+		http.Redirect(w, r, "/config", http.StatusFound)
+		return
+	}
+
+	tmpl, err := template.New("login").Parse(loginPageHTML)
+	if err != nil {
+		http.Error(w, "Template error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl.Execute(w, LoginPageData{})
+}
+
+// handleLogin processes the login form submission
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+
+	if username == AdminUsername && password == AdminPassword {
+		sessionID := createAdminSession()
+		setSessionCookie(w, sessionID)
+		log.Printf("Admin login successful from %s", r.RemoteAddr)
+		http.Redirect(w, r, "/config", http.StatusFound)
+		return
+	}
+
+	log.Printf("Admin login failed from %s (username: %s)", r.RemoteAddr, username)
+
+	tmpl, err := template.New("login").Parse(loginPageHTML)
+	if err != nil {
+		http.Error(w, "Template error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl.Execute(w, LoginPageData{Error: "用户名或密码错误"})
+}
+
+// handleLogout logs out the admin user
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	sessionID := getSessionFromRequest(r)
+	if sessionID != "" {
+		deleteAdminSession(sessionID)
+	}
+	clearSessionCookie(w)
+	http.Redirect(w, r, "/config/login", http.StatusFound)
+}
+
+// handleAddCredential handles manually adding a credential via JSON
+func handleAddCredential(w http.ResponseWriter, r *http.Request) {
+	var cred map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&cred); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	requiredFields := []string{"token", "refresh_token"}
+	for _, field := range requiredFields {
+		if _, ok := cred[field]; !ok {
+			http.Error(w, "Missing required field: "+field, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Set defaults for optional fields
+	if _, ok := cred["client_id"]; !ok {
+		cred["client_id"] = ClientID
+	}
+	if _, ok := cred["client_secret"]; !ok {
+		cred["client_secret"] = ClientSecret
+	}
+	if _, ok := cred["token_uri"]; !ok {
+		cred["token_uri"] = "https://oauth2.googleapis.com/token"
+	}
+	if _, ok := cred["scopes"]; !ok {
+		cred["scopes"] = Scopes
+	}
+
+	// Generate file path
+	credIndex := getNextCredentialIndex()
+	filePath := filepath.Join(CredentialsDir, fmt.Sprintf("cred_%d.json", credIndex))
+
+	// Save to file
+	jsonData, err := json.MarshalIndent(cred, "", "    ")
+	if err != nil {
+		http.Error(w, "Failed to marshal JSON: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.WriteFile(filePath, jsonData, 0600); err != nil {
+		http.Error(w, "Failed to save credential: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Manual credential saved to %s", filePath)
+
+	// Reload credential pool
+	credentialPool.Reload()
+
+	// Try to onboard the new credential
+	for _, c := range credentialPool.GetAll() {
+		if c.FilePath == filePath {
+			if err := c.EnsureValid(); err != nil {
+				log.Printf("Warning: new credential validation failed: %v", err)
+			}
+			if err := onboardUser(c); err != nil {
+				log.Printf("Warning: new credential onboarding failed: %v", err)
+			}
+			break
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Credential saved successfully"))
 }

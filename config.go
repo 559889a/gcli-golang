@@ -56,6 +56,8 @@ var (
 	Host               = getEnv("HOST", "0.0.0.0")
 	GeminiAuthPassword = getEnv("GEMINI_AUTH_PASSWORD", "123456")
 	CredentialsDir     = getEnv("CREDENTIALS_DIR", "./credentials")
+	AdminUsername      = getEnv("ADMIN_USERNAME", "admin")
+	AdminPassword      = getEnv("ADMIN_PASSWORD", "admin")
 )
 
 func getEnv(key, defaultValue string) string {

@@ -1,0 +1,23 @@
+# Credentials (sensitive data)
+credentials/
+*.json
+
+# Binary
+geminicli2api
+
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+LICENSE
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Shell scripts
+*.sh
