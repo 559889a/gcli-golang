@@ -342,3 +342,32 @@ func geminiStreamChunkToOpenAI(chunk map[string]interface{}, model, responseID s
 		"choices": choices,
 	}
 }
+
+// createOpenAIErrorResponse creates an OpenAI-compatible error response
+func createOpenAIErrorResponse(statusCode int, upstreamError map[string]interface{}) map[string]interface{} {
+	errMsg := "Unknown error from upstream API"
+	errType := "api_error"
+
+	if upstreamError != nil {
+		// Try to extract error info from upstream response
+		if errObj, ok := upstreamError["error"].(map[string]interface{}); ok {
+			if msg, ok := errObj["message"].(string); ok {
+				errMsg = msg
+			}
+			if status, ok := errObj["status"].(string); ok {
+				errType = status
+			}
+			if code, ok := errObj["code"].(string); ok && errType == "api_error" {
+				errType = code
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": errMsg,
+			"type":    errType,
+			"code":    statusCode,
+		},
+	}
+}

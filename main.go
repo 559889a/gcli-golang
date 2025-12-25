@@ -190,10 +190,21 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if request.Stream {
 		handleStreamingResponse(resp, w, request.Model)
 	} else {
-		geminiResp, err := handleNonStreamingResponse(resp)
+		geminiResp, statusCode, err := handleNonStreamingResponse(resp)
 		if err != nil {
 			log.Printf("Failed to parse response: %v", err)
-			http.Error(w, "Failed to parse response", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(createOpenAIErrorResponse(http.StatusInternalServerError, nil))
+			return
+		}
+
+		// Check if upstream returned an error
+		if statusCode >= 400 {
+			errorResp := createOpenAIErrorResponse(statusCode, geminiResp)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(statusCode)
+			json.NewEncoder(w).Encode(errorResp)
 			return
 		}
 

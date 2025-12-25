@@ -115,11 +115,12 @@ func sendGeminiRequest(cred *Credential, payload map[string]interface{}, isStrea
 }
 
 // handleNonStreamingResponse processes a non-streaming response from Google API
-func handleNonStreamingResponse(resp *http.Response) (map[string]interface{}, error) {
+// Returns the parsed response, HTTP status code, and any error
+func handleNonStreamingResponse(resp *http.Response) (map[string]interface{}, int, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[网络错误] 读取响应失败: %v", err)
-		return nil, err
+		return nil, 0, err
 	}
 
 	bodyStr := string(body)
@@ -136,15 +137,20 @@ func handleNonStreamingResponse(resp *http.Response) (map[string]interface{}, er
 
 	var wrapper map[string]interface{}
 	if err := json.Unmarshal([]byte(bodyStr), &wrapper); err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 
-	// Extract "response" field if present
+	// For error responses, return the raw parsed response so caller can extract error info
+	if resp.StatusCode >= 400 {
+		return wrapper, resp.StatusCode, nil
+	}
+
+	// Extract "response" field if present (normal response)
 	if response, ok := wrapper["response"].(map[string]interface{}); ok {
-		return response, nil
+		return response, resp.StatusCode, nil
 	}
 
-	return wrapper, nil
+	return wrapper, resp.StatusCode, nil
 }
 
 // StreamWriter handles writing SSE responses to the client
@@ -202,11 +208,20 @@ func handleStreamingResponse(resp *http.Response, w http.ResponseWriter, model s
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("[网络错误] 读取错误响应失败: %v", err)
-			http.Error(w, "Failed to read error response", http.StatusBadGateway)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(createOpenAIErrorResponse(http.StatusBadGateway, nil))
 			return
 		}
 		log.Printf("[HTTP %d] Google API 错误: %s", resp.StatusCode, string(body))
-		http.Error(w, fmt.Sprintf("Google API error: %s", resp.Status), resp.StatusCode)
+
+		// Parse upstream error for better error message
+		var upstreamError map[string]interface{}
+		json.Unmarshal(body, &upstreamError)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		json.NewEncoder(w).Encode(createOpenAIErrorResponse(resp.StatusCode, upstreamError))
 		return
 	}
 
