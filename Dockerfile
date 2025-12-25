@@ -27,14 +27,6 @@ COPY --from=builder /app/geminicli2api .
 # Create credentials directory
 RUN mkdir -p /app/credentials
 
-# Environment variables with defaults
-ENV PORT=8888
-ENV HOST=0.0.0.0
-ENV GEMINI_AUTH_PASSWORD=123456
-ENV CREDENTIALS_DIR=/app/credentials
-ENV ADMIN_USERNAME=admin
-ENV ADMIN_PASSWORD=admin
-
 # Expose port
 EXPOSE 8888
 
